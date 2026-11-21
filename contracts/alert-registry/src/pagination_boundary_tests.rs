@@ -131,3 +131,54 @@ fn limit_above_max_batch_size_is_clamped() {
         "limit 1000 should be clamped to MAX_BATCH_SIZE={MAX_BATCH_SIZE}"
     );
 }
+
+/// `get_active_alerts_paginated` applies offset/limit *after* filtering inactive alerts, so
+/// offset counts active-only results rather than raw index positions (#395).
+#[test]
+fn active_pagination_offset_counts_active_only_results() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(AlertRegistry, ());
+    let client = AlertRegistryClient::new(&env, &contract_id);
+
+    let querier = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    // Register 4 alerts, labelled a0..a3 in ID order.
+    let labels = ["a0", "a1", "a2", "a3"];
+    let mut ids = [0u32; 4];
+    for (i, label_str) in labels.iter().enumerate() {
+        let label = String::from_str(&env, label_str);
+        let id = client.register_alert(
+            &owner,
+            &target,
+            &label,
+            &hash64(&env),
+            &vec![&env, String::from_str(&env, "rule:transfer")],
+            &None,
+        );
+        ids[i] = id;
+    }
+
+    // Deactivate the first 2 alerts (a0, a1), leaving a2 and a3 active.
+    client.deactivate_alert(&owner, &ids[0]);
+    client.deactivate_alert(&owner, &ids[1]);
+
+    // offset=0, limit=1 must return the 3rd alert (a2), the first active one.
+    let first = client
+        .try_get_active_alerts_paginated(&querier, &target, &0, &1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first.get(0).unwrap().label, String::from_str(&env, "a2"));
+
+    // offset=1, limit=10 must return only the 4th alert (a3): offset counts active-only
+    // results, not raw index positions.
+    let second = client
+        .try_get_active_alerts_paginated(&querier, &target, &1, &10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second.get(0).unwrap().label, String::from_str(&env, "a3"));
+}
