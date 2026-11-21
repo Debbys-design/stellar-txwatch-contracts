@@ -7,7 +7,7 @@
 
 use soroban_sdk::{testutils::Address as _, vec, Address, Env, String};
 
-use crate::{AlertRegistry, AlertRegistryClient};
+use crate::{AlertRegistry, AlertRegistryClient, Error};
 
 fn unauthed() -> (Env, AlertRegistryClient<'static>) {
     let env = Env::default();
@@ -63,4 +63,31 @@ fn set_per_owner_alert_limit_requires_admin_auth() {
     client.initialize(&admin);
     let result = client.try_set_per_owner_alert_limit(&admin, &5);
     assert!(result.is_err());
+}
+
+#[test]
+fn multi_admin_lifecycle_add_and_remove() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(AlertRegistry, ());
+    let client = AlertRegistryClient::new(&env, &contract_id);
+
+    let admin_1 = Address::generate(&env);
+    let admin_2 = Address::generate(&env);
+
+    // Initialize with admin_1.
+    client.initialize(&admin_1);
+
+    // Add admin_2 to the admin set.
+    client.add_admin(&admin_1, &admin_2);
+
+    // admin_2 can perform admin actions.
+    client.set_per_owner_alert_limit(&admin_2, &7);
+
+    // Remove admin_1 from the admin set.
+    client.remove_admin(&admin_2, &admin_1);
+
+    // admin_1 is no longer authorized.
+    let result = client.try_set_per_owner_alert_limit(&admin_1, &9);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
