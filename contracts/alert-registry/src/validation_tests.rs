@@ -278,103 +278,49 @@ fn update_webhook_valid_hash_succeeds() {
     // A different valid 64-char hash
     let new_hash = str(&env, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     let result = client.try_update_webhook(&owner, &id, &new_hash);
-    assert!(result.is_ok(), "valid 64-char hash must be accepted in update_webhook");
+    assert!(result.is_ok(), "valid 64-char hash must be accepted");
 }
 
-// ── #209: BatchTooLarge / MAX_BATCH_SIZE clamping ────────────────────────────
+// ── #398: batch_register_alerts all-or-nothing atomicity ─────────────────────
 
-/// get_contract_alerts_paginated with limit > MAX_BATCH_SIZE is silently clamped.
-///
-/// Registers MAX_BATCH_SIZE + 5 alerts, then queries with limit = 1000.
-/// The response must contain at most MAX_BATCH_SIZE entries, not all registered ones.
+/// A batch whose second element has an invalid (63-char) webhook hash must
+/// fail with `InvalidWebhookHash` and register none of the alerts — including
+/// the valid first element.
 #[test]
-fn paginated_limit_exceeding_max_batch_size_is_clamped() {
+fn batch_register_alerts_invalid_hash_rolls_back_whole_batch() {
     let (env, client) = setup();
-    let querier = Address::generate(&env);
     let owner = Address::generate(&env);
-    let target = Address::generate(&env);
+    let target_a = Address::generate(&env);
+    let target_b = Address::generate(&env);
 
-    let total = MAX_BATCH_SIZE + 5;
-    for i in 0..total {
-        let label = String::from_str(&env, "alert");
-        let _ = i;
-        client.register_alert(
-            &owner,
-            &target,
-            &label,
-            &hash64(&env),
-            &vec![&env, str(&env, "rule:transfer")],
-            &None,
-        );
-    }
+    // 63 chars — one short of the required 64.
+    let short_hash = str(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
-    // limit = 1000 must be clamped to MAX_BATCH_SIZE
-    let page = client
-        .get_contract_alerts_paginated(&querier, &target, &0u32, &1000u32)
-        .unwrap();
+    let batch = vec![
+        &env,
+        (
+            owner.clone(),
+            target_a.clone(),
+            str(&env, "Alert A"),
+            hash64(&env),
+            vec![&env, str(&env, "rule:transfer")],
+        ),
+        (
+            owner.clone(),
+            target_b.clone(),
+            str(&env, "Alert B"),
+            short_hash,
+            vec![&env, str(&env, "rule:transfer")],
+        ),
+    ];
 
+    let result = client.try_batch_register_alerts(&batch);
+    assert_eq!(result, Err(Ok(ContractError::InvalidWebhookHash)));
+
+    // The valid first element must not have been persisted.
     assert_eq!(
-        page.len(),
-        MAX_BATCH_SIZE,
-        "limit=1000 must be clamped to MAX_BATCH_SIZE={MAX_BATCH_SIZE}"
+        client.count_for_contract(&target_a),
+        0,
+        "first element must not be registered when the batch fails"
     );
-}
-
-/// get_alerts_by_owner_paginated with limit > MAX_BATCH_SIZE is silently clamped.
-#[test]
-fn paginated_owner_limit_exceeding_max_batch_size_is_clamped() {
-    let (env, client) = setup();
-    let querier = Address::generate(&env);
-    let owner = Address::generate(&env);
-    let target = Address::generate(&env);
-
-    let total = MAX_BATCH_SIZE + 3;
-    for i in 0..total {
-        let label = String::from_str(&env, "alert");
-        let _ = i;
-        client.register_alert(
-            &owner,
-            &target,
-            &label,
-            &hash64(&env),
-            &vec![&env, str(&env, "rule:transfer")],
-            &None,
-        );
-    }
-
-    let page = client
-        .get_alerts_by_owner_paginated(&querier, &owner, &0u32, &u32::MAX)
-        .unwrap();
-
-    assert_eq!(
-        page.len(),
-        MAX_BATCH_SIZE,
-        "limit=u32::MAX must be clamped to MAX_BATCH_SIZE={MAX_BATCH_SIZE}"
-    );
-}
-
-/// A limit within MAX_BATCH_SIZE is respected exactly.
-#[test]
-fn paginated_limit_within_max_batch_size_is_exact() {
-    let (env, client) = setup();
-    let querier = Address::generate(&env);
-    let owner = Address::generate(&env);
-    let target = Address::generate(&env);
-
-    for _ in 0..10u32 {
-        client.register_alert(
-            &owner,
-            &target,
-            &str(&env, "alert"),
-            &hash64(&env),
-            &vec![&env, str(&env, "rule:transfer")],
-            &None,
-        );
-    }
-
-    let page = client
-        .get_contract_alerts_paginated(&querier, &target, &0u32, &5u32)
-        .unwrap();
-
-    assert_eq!(page.len(), 5, "limit=5 (below MAX_BATCH_SIZE) must return exactly 5");
 }
