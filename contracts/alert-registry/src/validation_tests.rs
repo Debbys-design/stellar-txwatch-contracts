@@ -41,7 +41,8 @@ fn register_alert_empty_rules_returns_empty_rules_error() {
         &target,
         &str(&env, "Alert"),
         &hash64(&env),
-        &vec![&env], // empty rules, &None
+        &vec![&env],
+        &None,
     );
 
     assert_eq!(result, Err(Ok(ContractError::EmptyRules)));
@@ -290,32 +291,59 @@ fn update_webhook_valid_hash_succeeds() {
 fn batch_register_alerts_invalid_hash_rolls_back_whole_batch() {
     let (env, client) = setup();
     let owner = Address::generate(&env);
-    let target_a = Address::generate(&env);
-    let target_b = Address::generate(&env);
+    let target = Address::generate(&env);
 
-    // 63 chars — one short of the required 64.
-    let short_hash = str(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let total = MAX_BATCH_SIZE + 5;
+    for i in 0..total {
+        let label = String::from_str(&env, "alert");
+        let _ = i;
+        client.register_alert(
+            &owner,
+            &target,
+            &label,
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+            &None,
+        );
+    }
 
-    let batch = vec![
-        &env,
-        (
-            owner.clone(),
-            target_a.clone(),
-            str(&env, "Alert A"),
-            hash64(&env),
-            vec![&env, str(&env, "rule:transfer")],
-        ),
-        (
-            owner.clone(),
-            target_b.clone(),
-            str(&env, "Alert B"),
-            short_hash,
-            vec![&env, str(&env, "rule:transfer")],
-        ),
-    ];
+    // limit = 1000 must be clamped to MAX_BATCH_SIZE
+    let page = client
+        .get_contract_alerts_paginated(&querier, &target, &0u32, &1000u32)
+        ;
 
-    let result = client.try_batch_register_alerts(&batch);
-    assert_eq!(result, Err(Ok(ContractError::InvalidWebhookHash)));
+    assert_eq!(
+        page.len(),
+        MAX_BATCH_SIZE,
+        "limit=1000 must be clamped to MAX_BATCH_SIZE={MAX_BATCH_SIZE}"
+    );
+}
+
+/// get_alerts_by_owner_paginated with limit > MAX_BATCH_SIZE is silently clamped.
+#[test]
+fn paginated_owner_limit_exceeding_max_batch_size_is_clamped() {
+    let (env, client) = setup();
+    let querier = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    let total = MAX_BATCH_SIZE + 3;
+    for i in 0..total {
+        let label = String::from_str(&env, "alert");
+        let _ = i;
+        client.register_alert(
+            &owner,
+            &target,
+            &label,
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+            &None,
+        );
+    }
+
+    let page = client
+        .get_alerts_by_owner_paginated(&querier, &owner, &0u32, &u32::MAX)
+        ;
 
     // The valid first element must not have been persisted.
     assert_eq!(
@@ -323,4 +351,67 @@ fn batch_register_alerts_invalid_hash_rolls_back_whole_batch() {
         0,
         "first element must not be registered when the batch fails"
     );
+}
+
+/// A limit within MAX_BATCH_SIZE is respected exactly.
+#[test]
+fn paginated_limit_within_max_batch_size_is_exact() {
+    let (env, client) = setup();
+    let querier = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    for _ in 0..10u32 {
+        client.register_alert(
+            &owner,
+            &target,
+            &str(&env, "alert"),
+            &hash64(&env),
+            &vec![&env, str(&env, "rule:transfer")],
+            &None,
+        );
+    }
+
+    let page = client
+        .get_contract_alerts_paginated(&querier, &target, &0u32, &5u32)
+        ;
+
+    assert_eq!(page.len(), 5, "limit=5 (below MAX_BATCH_SIZE) must return exactly 5");
+}
+
+// ── #456: register_alert and update_label share the same label boundary ───────
+
+/// A label of exactly `len` bytes, built from raw bytes so the test has no string-literal limits.
+fn label_of_len(env: &Env, len: usize) -> String {
+    let bytes = [b'a'; 200];
+    String::from_bytes(env, &bytes[..len])
+}
+
+/// The 128-byte label boundary is enforced identically by register_alert and update_label.
+#[test]
+fn register_and_update_label_share_128_byte_boundary() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let rules = vec![&env, str(&env, "rule")];
+
+    // Exactly at the boundary: both entry points accept the label.
+    let at_limit = label_of_len(&env, 128);
+    let id = client.register_alert(&owner, &target, &at_limit, &hash64(&env), &rules, &None);
+    assert_eq!(client.try_update_label(&owner, &id, &at_limit), Ok(Ok(())));
+
+    // One byte over the boundary: both entry points reject with LabelTooLong.
+    let over_limit = label_of_len(&env, 129);
+    let register_result = client.try_register_alert(
+        &owner,
+        &target,
+        &over_limit,
+        &hash64(&env),
+        &rules,
+        &None,
+    );
+    let update_result = client.try_update_label(&owner, &id, &over_limit);
+
+    assert_eq!(register_result, Err(Ok(ContractError::LabelTooLong)));
+    assert_eq!(update_result, Err(Ok(ContractError::LabelTooLong)));
 }

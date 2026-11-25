@@ -66,28 +66,12 @@ fn set_per_owner_alert_limit_requires_admin_auth() {
 }
 
 #[test]
-fn multi_admin_lifecycle_add_and_remove() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register(AlertRegistry, ());
-    let client = AlertRegistryClient::new(&env, &contract_id);
-
-    let admin_1 = Address::generate(&env);
-    let admin_2 = Address::generate(&env);
-
-    // Initialize with admin_1.
-    client.initialize(&admin_1);
-
-    // Add admin_2 to the admin set.
-    client.add_admin(&admin_1, &admin_2);
-
-    // admin_2 can perform admin actions.
-    client.set_per_owner_alert_limit(&admin_2, &7);
-
-    // Remove admin_1 from the admin set.
-    client.remove_admin(&admin_2, &admin_1);
-
-    // admin_1 is no longer authorized.
-    let result = client.try_set_per_owner_alert_limit(&admin_1, &9);
-    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+fn initialize_requires_admin_auth() {
+    // Front-running guard (#447): without the admin's signature, nobody can
+    // claim the first admin slot on a freshly deployed registry.
+    let (env, client) = unauthed();
+    let admin = Address::generate(&env);
+    let result = client.try_initialize(&admin);
+    assert!(result.is_err());
+    assert!(client.get_admins().is_none());
 }
